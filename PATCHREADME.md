@@ -47,3 +47,16 @@ python3 main_realtime.py --camera webcam --vis_map --submap_size 8 --max_loops 0
 - `--vis_voxel_size 0.01` is the realtime default so viser does not freeze on dense clouds.
 - `--min_disparity 25` if keyframes are too sparse. `--camera_id 1` if the wrong camera opens.
 - Open-set: add `--run_os` (no OpenCV preview). RealSense: omit `--camera webcam`.
+
+## SAM3 live mask preview (not in SLAM yet)
+
+```bash
+conda activate vggt-slam
+cd /path/to/VGGT-SLAM
+python3 sam3_webcam_mask.py
+python3 sam3_webcam_mask.py --prompt "person's hands and whatever they are holding"
+```
+
+- Left: red overlay. Right: masked pixels blacked out.
+- `--prompt person` (default), `hand`, or a longer phrase. `--every 2` if it is too slow.
+- Matplotlib window (OpenCV display breaks after SAM3 loads). Close the window or Ctrl+C.
