@@ -18,12 +18,16 @@ from vggt.models.vggt import VGGT
 solver_lock = threading.Lock()  # Ensures only one solver thread runs at a time
 data_lock = threading.Lock()    # Protects shared SLAM state (solver)
 
-parser = argparse.ArgumentParser(description="VGGT-SLAM RealSense live demo")
+parser = argparse.ArgumentParser(description="VGGT-SLAM live demo")
 parser.add_argument("--keyframe_folder", type=str, default="keyframes", help="Folder to save captured keyframes")
 parser.add_argument("--camera", type=str, default="realsense", choices=list(BACKENDS.keys()), help="Camera backend (default: realsense)")
+parser.add_argument("--camera_id", type=int, default=0, help="Webcam device index for --camera webcam (default: 0)")
+parser.add_argument("--camera_width", type=int, default=640, help="Requested capture width")
+parser.add_argument("--camera_height", type=int, default=480, help="Requested capture height")
+parser.add_argument("--camera_fps", type=int, default=30, help="Requested capture FPS")
 parser.add_argument("--vis_map", action="store_true", help="Visualize point cloud in viser as it is being built, otherwise only show the final map")
 parser.add_argument("--vis_imgs", action="store_true", help="Show camera images in the viser frustums. By default only the frustums are shown (faster visualization)")
-parser.add_argument("--vis_voxel_size", type=float, default=None, help="Voxel size for downsampling the point cloud in the viewer (e.g. 0.05 for 5 cm). Default: no downsampling")
+parser.add_argument("--vis_voxel_size", type=float, default=0.01, help="Voxel size for downsampling the point cloud in the viewer. Default 0.01. Set 0 to disable.")
 parser.add_argument("--vis_flow", action="store_true", help="Visualize optical flow from RAFT for keyframe selection")
 parser.add_argument("--run_os", action="store_true", help="Enable open-set semantic search with Perception Encoder CLIP and SAM3")
 parser.add_argument("--submap_size", type=int, default=16, help="Number of new frames per submap, does not include overlapping frames or loop closure frames")
@@ -90,6 +94,7 @@ def threaded_process_submap(image_names_subset, solver, model, args, clip_model,
                     solver.update_all_submap_vis()
                 else:
                     solver.update_latest_submap_vis()
+                print("[SLAM] Viser updated. Refresh http://localhost:8080 if the view is empty.")
         print("[SLAM] Submap done.")
     except Exception as e:
         import traceback
@@ -155,10 +160,11 @@ def main():
     # case and print periodic status to the console instead.
     use_display = not args.run_os
 
+    vis_voxel_size = None if args.vis_voxel_size == 0 else args.vis_voxel_size
     solver = Solver(
         init_conf_threshold=args.conf_threshold,
         lc_thres=args.lc_thres,
-        vis_voxel_size=args.vis_voxel_size,
+        vis_voxel_size=vis_voxel_size,
         vis_imgs=args.vis_imgs,
     )
 
@@ -196,7 +202,10 @@ def main():
         solver.viewer.add_object_query_gui(solver, clip_model, clip_tokenizer, processor, data_lock)
 
     # --- Camera setup ---
-    camera = BACKENDS[args.camera]()
+    camera_kwargs = dict(width=args.camera_width, height=args.camera_height, fps=args.camera_fps)
+    if args.camera == "webcam":
+        camera_kwargs["device"] = args.camera_id
+    camera = BACKENDS[args.camera](**camera_kwargs)
     print(f"Initializing {args.camera} camera...")
     os.makedirs(args.keyframe_folder, exist_ok=True)
     camera.start()
@@ -275,12 +284,14 @@ def main():
                 cv2.imshow("VGGT-SLAM Live", display)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-            else:
-                if frame_count - last_status_frame >= 30:
-                    busy_str = "  [SLAM running]" if slam_busy else ""
-                    print(f"[Camera] frame={frame_count}  KFs={kf}/{target_size}"
-                          f"  submaps={submap_count}{busy_str}")
-                    last_status_frame = frame_count
+
+            if frame_count - last_status_frame >= 30:
+                busy_str = "  [SLAM running]" if slam_busy else ""
+                print(f"[Camera] frame={frame_count}  KFs={kf}/{target_size}"
+                      f"  submaps={submap_count}{busy_str}")
+                if kf < target_size:
+                    print("[Camera] Move the camera; new submaps need enough keyframe motion.")
+                last_status_frame = frame_count
 
     except KeyboardInterrupt:
         print("\n[Main] Shutting down...")

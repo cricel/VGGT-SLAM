@@ -153,7 +153,9 @@ def main():
         # objects in the viewer in addition to the terminal prompt below.
         import threading
         data_lock = threading.Lock()
-        solver.viewer.add_object_query_gui(solver, clip_model, clip_tokenizer, processor, data_lock)
+        solver.viewer.add_object_query_gui(
+            solver, clip_model, clip_tokenizer, lambda: processor, data_lock
+        )
 
         while True:
             # Prompt user for text input

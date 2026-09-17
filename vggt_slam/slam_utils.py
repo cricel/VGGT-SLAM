@@ -179,7 +179,7 @@ def overlay_masks(image, masks):
     image = image.convert("RGBA")
 
     # masks: (N, 1, H, W) or (N, H, W)
-    masks = (255 * masks.cpu().numpy()).astype(np.uint8)
+    masks = (255 * masks.detach().float().cpu().numpy()).astype(np.uint8)
 
     n_masks = masks.shape[0]
     cmap = matplotlib.colormaps.get_cmap("rainbow").resampled(n_masks)

@@ -173,13 +173,14 @@ class Viewer:
             visible=True
         )
 
-    def add_object_query_gui(self, solver, clip_model, clip_tokenizer, processor, data_lock) -> None:
+    def add_object_query_gui(self, solver, clip_model, clip_tokenizer, get_processor, data_lock) -> None:
         """Add an object query panel to the viser sidebar.
 
         Mirrors the terminal open-set query flow: retrieve the best-matching
         keyframe via CLIP, run SAM3 to segment the queried object, then draw an
         oriented bounding box per detected instance in the 3-D scene. Requires
-        --run_os (clip_model / processor loaded) and a non-empty map.
+        --run_os (clip_model loaded) and a non-empty map.
+        get_processor is a callable that returns a Sam3Processor (loaded lazily).
         """
         import torch
         from torchvision.transforms.functional import to_pil_image
@@ -210,6 +211,7 @@ class Viewer:
 
                     with torch.no_grad():
                         pil_img = to_pil_image(best_img)
+                        processor = get_processor()
                         inference_state = processor.set_image(pil_img)
                         output = processor.set_text_prompt(state=inference_state, prompt=query)
                         masks = output["masks"]

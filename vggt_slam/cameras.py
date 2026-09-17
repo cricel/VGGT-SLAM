@@ -53,6 +53,44 @@ class RealSenseCamera(Camera):
             self._pipeline = None
 
 
+class WebcamCamera(Camera):
+    """Generic USB / built-in webcam via OpenCV."""
+
+    def __init__(self, device: int = 0, width: int = 640, height: int = 480, fps: int = 30):
+        self._device = device
+        self._width = width
+        self._height = height
+        self._fps = fps
+        self._cap = None
+
+    def start(self) -> None:
+        import cv2
+
+        cap = cv2.VideoCapture(self._device, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(self._device)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open webcam at index {self._device}")
+
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        cap.set(cv2.CAP_PROP_FPS, self._fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._cap = cap
+
+    def capture(self) -> Optional[np.ndarray]:
+        ok, frame = self._cap.read()
+        return frame if ok else None
+
+    def stop(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+
 BACKENDS = {
     "realsense": RealSenseCamera,
+    "webcam": WebcamCamera,
 }
