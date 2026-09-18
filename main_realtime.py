@@ -17,6 +17,7 @@ from vggt.models.vggt import VGGT
 # --- Thread Safety Primitives ---
 solver_lock = threading.Lock()  # Ensures only one solver thread runs at a time
 data_lock = threading.Lock()    # Protects shared SLAM state (solver)
+sam3_lock = threading.Lock()    # SAM3 is not thread-safe (mask thread vs object scan)
 
 parser = argparse.ArgumentParser(description="VGGT-SLAM live demo")
 parser.add_argument("--keyframe_folder", type=str, default="keyframes", help="Folder to save captured keyframes")
@@ -30,6 +31,15 @@ parser.add_argument("--vis_imgs", action="store_true", help="Show camera images 
 parser.add_argument("--vis_voxel_size", type=float, default=0.01, help="Voxel size for downsampling the point cloud in the viewer. Default 0.01. Set 0 to disable.")
 parser.add_argument("--vis_flow", action="store_true", help="Visualize optical flow from RAFT for keyframe selection")
 parser.add_argument("--run_os", action="store_true", help="Enable open-set semantic search with Perception Encoder CLIP and SAM3")
+parser.add_argument(
+    "--mask_prompt",
+    type=str,
+    nargs="?",
+    const="person",
+    default=None,
+    help="SAM3-mask keyframes (black out matches) before VGGT. "
+         "Pass flag alone for the default prompt, or a custom string.",
+)
 parser.add_argument("--submap_size", type=int, default=16, help="Number of new frames per submap, does not include overlapping frames or loop closure frames")
 parser.add_argument("--overlapping_window_size", type=int, default=1, help="ONLY DEFAULT OF 1 SUPPORTED RIGHT NOW. Number of overlapping frames, which are used in SL(4) estimation")
 parser.add_argument("--max_loops", type=int, default=1, help="ONLY DEFAULT OF 1 SUPPORTED RIGHT NOW or 0 to disable loop closures.")
@@ -39,6 +49,12 @@ parser.add_argument("--lc_thres", type=float, default=0.95, help="Threshold for 
 parser.add_argument("--log_results", action="store_true", help="save txt file with results")
 parser.add_argument("--skip_dense_log", action="store_true", help="by default, logging poses and logs dense point clouds. If this flag is set, dense logging is skipped")
 parser.add_argument("--log_path", type=str, default="poses.txt", help="Path to save the log file")
+parser.add_argument(
+    "--risk_bridge_port",
+    type=int,
+    default=8765,
+    help="TCP port for the mechlmm_risk VGGT adapter (JSON lines). 0 disables.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +111,10 @@ def threaded_process_submap(image_names_subset, solver, model, args, clip_model,
                 else:
                     solver.update_latest_submap_vis()
                 print("[SLAM] Viser updated. Refresh http://localhost:8080 if the view is empty.")
+        bridge = getattr(solver, "risk_bridge", None)
+        if bridge is not None:
+            loops = predictions.get("detected_loops") or []
+            bridge.publish_latest_pose(loop_closed=len(loops) > 0)
         print("[SLAM] Submap done.")
     except Exception as e:
         import traceback
@@ -155,10 +175,10 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # When --run_os is set, SAM3/decord loads its own libxcb which poisons
-    # OpenCV's XCB state and makes cv2.waitKey() hang. Skip cv2 display in that
-    # case and print periodic status to the console instead.
-    use_display = not args.run_os
+    # SAM3/decord loads its own libxcb which poisons OpenCV's XCB state and
+    # makes cv2.waitKey() hang. Skip cv2 display whenever SAM3 is loaded.
+    use_sam3_mask = args.mask_prompt is not None
+    use_display = not (args.run_os or use_sam3_mask)
 
     vis_voxel_size = None if args.vis_voxel_size == 0 else args.vis_voxel_size
     solver = Solver(
@@ -170,22 +190,26 @@ def main():
 
     print("Initializing and loading VGGT model...")
 
-    if args.run_os:
+    processor = None
+    clip_model, clip_preprocess, clip_tokenizer = None, None, None
+    if args.run_os or use_sam3_mask:
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
-        import core.vision_encoder.pe as pe
-        import core.vision_encoder.transforms as transforms
 
         sam3_model = build_sam3_image_model()
         processor = Sam3Processor(sam3_model, confidence_threshold=0.50)
+
+    if args.run_os:
+        import core.vision_encoder.pe as pe
+        import core.vision_encoder.transforms as transforms
 
         clip_model = pe.CLIP.from_config("PE-Core-L14-336", pretrained=True)  # Downloads from HF
         clip_model = clip_model.cuda()
         clip_tokenizer = transforms.get_text_tokenizer(clip_model.context_length)
         clip_preprocess = transforms.get_image_transform(clip_model.image_size)
-    else:
-        clip_model, clip_preprocess = None, None
-        clip_tokenizer, processor = None, None
+
+    if use_sam3_mask:
+        print(f"SAM3 keyframe masking enabled. Prompt: {args.mask_prompt!r}")
 
     model = VGGT()
     _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
@@ -195,6 +219,21 @@ def main():
     model = model.to(torch.bfloat16)  # use half precision
     model = model.to(device)
     print("All models loaded. Starting SLAM loop.")
+
+    from vggt_slam.risk_bridge import RiskBridge
+
+    risk_bridge = RiskBridge(
+        solver=solver,
+        data_lock=data_lock,
+        solver_lock=solver_lock,
+        sam3_lock=sam3_lock,
+        clip_model=clip_model,
+        clip_tokenizer=clip_tokenizer,
+        processor=processor,
+        port=args.risk_bridge_port,
+    )
+    risk_bridge.start()
+    solver.risk_bridge = risk_bridge
 
     # Register the viser object-query panel so the user can search for objects
     # live (and after capture) without using the terminal.
@@ -252,7 +291,13 @@ def main():
             frame_count += 1
 
             if solver.flow_tracker.compute_disparity(img, args.min_disparity, args.vis_flow):
-                frame_path = save_keyframe(img, args.keyframe_folder, frame_count)
+                kf_img = img
+                if use_sam3_mask:
+                    t_mask = time.time()
+                    with sam3_lock:
+                        kf_img, n_inst = utils.sam3_blackout_bgr(processor, img, args.mask_prompt)
+                    print(f"[Mask] keyframe {frame_count}: {n_inst} instance(s) in {time.time()-t_mask:.2f}s")
+                frame_path = save_keyframe(kf_img, args.keyframe_folder, frame_count)
                 image_names_subset.append(frame_path)
 
             if len(image_names_subset) >= target_size:
@@ -300,6 +345,8 @@ def main():
             camera.stop()
         if use_display:
             cv2.destroyAllWindows()
+        if getattr(solver, "risk_bridge", None) is not None:
+            solver.risk_bridge.stop()
 
     # Wait for any in-flight submap to finish before final visualization/logging.
     with solver_lock:

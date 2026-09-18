@@ -201,6 +201,37 @@ def overlay_masks(image, masks):
 
     return image
 
+
+def sam3_union_mask(masks: torch.Tensor, height: int, width: int) -> np.ndarray:
+    """Union of SAM3 instance masks -> bool (H, W) in the original image size."""
+    if masks is None or masks.numel() == 0 or masks.shape[0] == 0:
+        return np.zeros((height, width), dtype=bool)
+    m = masks.detach()
+    if m.ndim == 4:
+        m = m[:, 0]
+    union = m.any(dim=0).float().cpu().numpy() > 0.5
+    if union.shape != (height, width):
+        union = np.array(
+            Image.fromarray(union.astype(np.uint8) * 255).resize((width, height), Image.NEAREST)
+        ).astype(bool)
+    return union
+
+
+def sam3_blackout_bgr(processor, bgr: np.ndarray, prompt: str):
+    """Run SAM3 on a BGR frame and zero masked pixels. Returns (masked_bgr, n_instances)."""
+    rgb = bgr[:, :, ::-1].copy()
+    h, w = rgb.shape[:2]
+    pil = Image.fromarray(rgb)
+    with torch.no_grad():
+        state = processor.set_image(pil)
+        out = processor.set_text_prompt(state=state, prompt=prompt)
+    union = sam3_union_mask(out["masks"], h, w)
+    masked = bgr.copy()
+    masked[union] = 0
+    n = int(out["masks"].shape[0]) if out["masks"] is not None else 0
+    return masked, n
+
+
 class Accumulator:
     def __init__(self):
         self.total_time = 0
